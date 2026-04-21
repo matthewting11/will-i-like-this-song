@@ -1,77 +1,189 @@
 import os
+import time
+import requests
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Load dataset
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-file_path = os.path.join(BASE_DIR, "data", "songs.csv")
-df = pd.read_csv("data/songs.csv")
+LIKED_PATH = os.path.join(BASE_DIR, "data", "liked_songs.csv")
 
-# Features and label
-features = ["tempo", "energy", "danceability", "acousticness", "valence", "loudness"]
-X = df[features]
-y = df["like"]
-
-# Split data
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
-)
-
-# Train model
-model = RandomForestClassifier(random_state=42)
-model.fit(X_train, y_train)
-
-# Test model
-y_pred = model.predict(X_test)
-print("Accuracy:", accuracy_score(y_test, y_pred))
-
-# Predict a new song
-new_song = pd.DataFrame([{
-    "tempo": 115,
-    "energy": 0.7,
-    "danceability": 0.6,
-    "acousticness": 0.15,
-    "valence": 0.55,
-    "loudness": -6
-}])
-
-prediction = model.predict(new_song)
-probability = model.predict_proba(new_song)
-
-like_prob = probability[0][1]
-
-print("\n--- Analysis ---")
-
-if like_prob > 0.75:
-    print("You will very likely enjoy this song. It matches your preference for energetic and engaging tracks.")
-elif like_prob > 0.6:
-    print("You will probably like this song. It has some characteristics that align with your music taste.")
-elif like_prob > 0.4:
-    print("This song is a borderline match. It has mixed features compared to your usual preferences.")
-else:
-    print("You are unlikely to enjoy this song. It does not align well with your typical listening patterns.")
-
-importances = model.feature_importances_
-top_feature = features[importances.argmax()]
-
-print(f"\nYour music taste is most influenced by: {top_feature}")
-
-print("Prediction (1 = like, 0 = not):", prediction[0])
-print("Probability of not liking:", probability[0][0])
-print("Probability of liking:", probability[0][1])
+FEATURES = ["tempo", "energy", "danceability", "acousticness", "valence", "loudness"]
+BASE_URL = "https://api.reccobeats.com/v1"
 
 
+def extract_spotify_id(link: str) -> str:
+    return link.rstrip("/").split("/")[-1].split("?")[0]
 
-import matplotlib.pyplot as plt
 
-importances = model.feature_importances_
+def chunk_list(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
 
-plt.bar(features, importances)
-plt.title("Which song features matter most to my taste?")
-plt.xlabel("Feature")
-plt.ylabel("Importance")
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.show()
+
+def safe_get_json(url, params=None, timeout=20):
+    response = requests.get(url, params=params, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+
+def load_liked_songs(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame()
+
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def validate_columns(df: pd.DataFrame, name: str) -> bool:
+    missing = [col for col in FEATURES if col not in df.columns]
+    if missing:
+        print(f"{name} is missing required columns: {missing}")
+        return False
+    return True
+
+
+def prompt_candidate_links():
+    print("\nPaste Spotify track links for songs you want recommended from.")
+    print("Paste one per line. Type 'done' when finished.\n")
+
+    links = []
+    while True:
+        user_input = input("> ").strip()
+        if user_input.lower() == "done":
+            break
+        if user_input:
+            links.append(user_input)
+
+    return links
+
+
+def get_candidate_songs_from_links(links):
+    rows = []
+    spotify_ids = [extract_spotify_id(link) for link in links]
+
+    for chunk in chunk_list(spotify_ids, 20):
+        print(f"\nProcessing candidate batch of {len(chunk)} songs...")
+
+        try:
+            data = safe_get_json(f"{BASE_URL}/track", params={"ids": ",".join(chunk)})
+            tracks = data.get("content") or data.get("data") or data
+        except Exception as e:
+            print(f"Failed to fetch candidate batch: {e}")
+            continue
+
+        if not isinstance(tracks, list):
+            print("Unexpected candidate track response format.")
+            continue
+
+        for track in tracks:
+            try:
+                rb_id = track.get("id")
+                if not rb_id:
+                    continue
+
+                features_data = safe_get_json(f"{BASE_URL}/track/{rb_id}/audio-features")
+                features = features_data.get("content") or features_data.get("data") or features_data
+
+                title = track.get("trackTitle") or track.get("title") or track.get("name") or "Unknown"
+                artist = (
+                    track.get("artists", [{}])[0].get("name")
+                    if track.get("artists") else "Unknown"
+                )
+
+                song_link = (
+                    track.get("href")
+                    or track.get("spotifyHref")
+                    or track.get("spotifyUrl")
+                    or ""
+                )
+
+                rows.append({
+                    "track_title": title,
+                    "artist": artist,
+                    "song_link": song_link,
+                    "tempo": features.get("tempo"),
+                    "energy": features.get("energy"),
+                    "danceability": features.get("danceability"),
+                    "acousticness": features.get("acousticness"),
+                    "valence": features.get("valence"),
+                    "loudness": features.get("loudness"),
+                })
+
+                print(f"Loaded candidate: {title} - {artist}")
+
+            except Exception as e:
+                print(f"Failed candidate track: {e}")
+
+        time.sleep(0.2)
+
+    return pd.DataFrame(rows)
+
+
+def recommend_from_candidates(liked_df: pd.DataFrame, candidate_df: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    liked_profile = liked_df[FEATURES].mean().values.reshape(1, -1)
+    candidate_features = candidate_df[FEATURES].copy()
+
+    similarities = cosine_similarity(candidate_features, liked_profile).flatten()
+    candidate_df = candidate_df.copy()
+    candidate_df["similarity"] = similarities
+
+    # Remove songs already in liked_songs.csv if links are available
+    if "song_link" in liked_df.columns and "song_link" in candidate_df.columns:
+        liked_links = set(liked_df["song_link"].dropna())
+        candidate_df = candidate_df[~candidate_df["song_link"].isin(liked_links)]
+
+    return candidate_df.sort_values(by="similarity", ascending=False).head(top_n)
+
+
+def main():
+    liked_df = load_liked_songs(LIKED_PATH)
+
+    if liked_df.empty:
+        print("liked_songs.csv is empty or missing.")
+        print("Add songs you like first before asking for recommendations.")
+        return
+
+    if not validate_columns(liked_df, "liked_songs.csv"):
+        return
+
+    print(f"\nLoaded {len(liked_df)} liked songs.")
+    print("Your liked songs will be used to build your taste profile.")
+
+    candidate_links = prompt_candidate_links()
+
+    if not candidate_links:
+        print("No candidate songs entered. Exiting.")
+        return
+
+    candidate_df = get_candidate_songs_from_links(candidate_links)
+
+    if candidate_df.empty:
+        print("No candidate songs were loaded successfully.")
+        return
+
+    if not validate_columns(candidate_df, "candidate songs"):
+        return
+
+    recommendations = recommend_from_candidates(liked_df, candidate_df, top_n=10)
+
+    if recommendations.empty:
+        print("No recommendations found.")
+        return
+
+    print("\n--- Recommended Songs From Your Candidate Playlist ---")
+    display_cols = [col for col in ["track_title", "artist", "similarity"] if col in recommendations.columns]
+    print(recommendations[display_cols].to_string(index=False))
+
+    avg_profile = liked_df[FEATURES].mean()
+    top_feature = avg_profile.idxmax()
+
+    print("\n--- Analysis ---")
+    print(f"These recommendations were chosen from the playlist you pasted in.")
+    print(f"They are the closest matches to your liked songs based on audio features.")
+    print(f"Your taste profile is currently most aligned with: {top_feature}.")
+
+
+if __name__ == "__main__":
+    main()
