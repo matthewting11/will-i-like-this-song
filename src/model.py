@@ -136,6 +136,67 @@ def recommend_from_candidates(liked_df: pd.DataFrame, candidate_df: pd.DataFrame
 
     return candidate_df.sort_values(by="similarity", ascending=False).head(top_n)
 
+def prompt_to_add_top_candidates(recommendations: pd.DataFrame, liked_df: pd.DataFrame, liked_path: str):
+    if recommendations.empty:
+        return liked_df
+
+    num_to_prompt = max(1, int(len(recommendations)))
+    top_candidates = recommendations.head(num_to_prompt).copy()
+
+    print(f"\n--- Review Top {num_to_prompt} Candidate Songs ---")
+
+    rows_to_add = []
+
+    for i, row in enumerate(top_candidates.itertuples(index=False), start=1):
+        title = getattr(row, "track_title", "Unknown")
+        artist = getattr(row, "artist", "Unknown")
+        similarity = getattr(row, "similarity", None)
+        link = getattr(row, "song_link", "")
+
+        print(f"\n[{i}/{num_to_prompt}]")
+        print(f"Song: {title} - {artist}")
+        if similarity is not None:
+            print(f"Similarity: {similarity:.3f}")
+        if link:
+            print(f"Link: {link}")
+
+        while True:
+            choice = input("Add this song to liked_songs.csv? (y/n): ").strip().lower()
+            if choice in {"y", "n"}:
+                break
+            print("Invalid input. Enter y or n.")
+
+        if choice == "y":
+            rows_to_add.append({
+                "track_title": row.track_title,
+                "artist": row.artist,
+                "song_link": row.song_link,
+                "tempo": row.tempo,
+                "energy": row.energy,
+                "danceability": row.danceability,
+                "acousticness": row.acousticness,
+                "valence": row.valence,
+                "loudness": row.loudness,
+            })
+
+    if rows_to_add:
+        add_df = pd.DataFrame(rows_to_add)
+
+        if not liked_df.empty and "song_link" in liked_df.columns:
+            existing_links = set(liked_df["song_link"].dropna())
+            add_df = add_df[~add_df["song_link"].isin(existing_links)]
+
+        if not add_df.empty:
+            liked_df = pd.concat([liked_df, add_df], ignore_index=True)
+            liked_df.to_csv(liked_path, index=False)
+            print(f"\nAdded {len(add_df)} song(s) to liked_songs.csv.")
+        else:
+            print("\nNo new songs were added (all selected songs were already saved).")
+    else:
+        print("\nNo songs were added to liked_songs.csv.")
+
+    return liked_df
+
 
 def main():
     liked_df = load_liked_songs(LIKED_PATH)
@@ -175,6 +236,8 @@ def main():
     print("\n--- Recommended Songs From Your Candidate Playlist ---")
     display_cols = [col for col in ["track_title", "artist", "similarity"] if col in recommendations.columns]
     print(recommendations[display_cols].to_string(index=False))
+
+    liked_df = prompt_to_add_top_candidates(recommendations, liked_df, LIKED_PATH)
 
     avg_profile = liked_df[FEATURES].mean()
     top_feature = avg_profile.idxmax()
