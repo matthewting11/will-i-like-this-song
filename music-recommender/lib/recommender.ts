@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import Papa from "papaparse";
 
 export type SongRow = {
   track_title: string;
@@ -35,56 +36,27 @@ export const FEATURES: FeatureKey[] = [
 const dataPath = path.join(process.cwd(), "data", "liked_songs.csv");
 
 function parseCsv(text: string): SongRow[] {
-  const lines = text.trim().split(/\r?\n/);
-  if (lines.length <= 1) return [];
-
-  const headers = lines[0].split(",").map((h) => h.trim());
-
-  return lines.slice(1).map((line) => {
-    const cols = line.split(",");
-    const row: Record<string, string> = {};
-
-    headers.forEach((header, i) => {
-      row[header] = (cols[i] ?? "").trim();
-    });
-
-    return {
-      track_title: row.track_title || "",
-      artist: row.artist || "",
-      song_link: row.song_link || "",
-      tempo: Number(row.tempo || 0),
-      energy: Number(row.energy || 0),
-      danceability: Number(row.danceability || 0),
-      acousticness: Number(row.acousticness || 0),
-      valence: Number(row.valence || 0),
-      loudness: Number(row.loudness || 0),
-    };
+  const parsed = Papa.parse<SongRow>(text, {
+    header: true,
+    skipEmptyLines: true,
+    dynamicTyping: true,
   });
+
+  return (parsed.data || []).map((row) => ({
+    track_title: row.track_title || "",
+    artist: row.artist || "",
+    song_link: row.song_link || "",
+    tempo: Number(row.tempo || 0),
+    energy: Number(row.energy || 0),
+    danceability: Number(row.danceability || 0),
+    acousticness: Number(row.acousticness || 0),
+    valence: Number(row.valence || 0),
+    loudness: Number(row.loudness || 0),
+  }));
 }
 
 function toCsv(rows: SongRow[]): string {
-  const headers = [
-    "track_title",
-    "artist",
-    "song_link",
-    "tempo",
-    "energy",
-    "danceability",
-    "acousticness",
-    "valence",
-    "loudness",
-  ] as const;
-
-  const body = rows.map((row) =>
-    headers
-      .map((header) => {
-        const value = String(row[header] ?? "");
-        return value.includes(",") ? `"${value.replace(/"/g, '""')}"` : value;
-      })
-      .join(",")
-  );
-
-  return [headers.join(","), ...body].join("\n");
+  return Papa.unparse(rows);
 }
 
 export function loadLikedSongs(): SongRow[] {
@@ -131,7 +103,11 @@ export async function fetchCandidateSongs(links: string[]): Promise<SongRow[]> {
   const spotifyIds = links.map(extractSpotifyId).filter(Boolean);
   const batches = chunk(spotifyIds, 20);
   const rows: SongRow[] = [];
-
+  function normalizeTempo(tempo: number) {
+    if (tempo >= 190) return tempo / 2;
+    if (tempo > 0 && tempo <= 60) return tempo * 2;
+    return tempo;
+  }
   for (const batch of batches) {
     const trackData = await fetchJson(
       `https://api.reccobeats.com/v1/track?ids=${encodeURIComponent(batch.join(","))}`
@@ -153,7 +129,7 @@ export async function fetchCandidateSongs(links: string[]): Promise<SongRow[]> {
         track_title: track.trackTitle || track.title || track.name || "Unknown",
         artist: track.artists?.[0]?.name || "Unknown Artist",
         song_link: track.href || track.spotifyHref || track.spotifyUrl || "",
-        tempo: Number(f.tempo || 0),
+        tempo: normalizeTempo(Number(f.tempo || 0)),
         energy: Number(f.energy || 0),
         danceability: Number(f.danceability || 0),
         acousticness: Number(f.acousticness || 0),
@@ -220,15 +196,23 @@ export function recommendSongs(
   const profile = averageProfile(liked);
   const likedLinks = new Set(liked.map((s) => s.song_link));
 
+  console.log("PROFILE:", profile);
+  console.log("FIRST CANDIDATE:", candidates[0]);
+
   return candidates
     .filter((song) => !likedLinks.has(song.song_link))
-    .map((song) => ({
-      ...song,
-      score: cosineSimilarity(
-        FEATURES.map((feature) => song[feature]),
-        FEATURES.map((feature) => profile[feature])
-      ),
-    }))
+    .map((song) => {
+      const candidateVector = FEATURES.map((feature) => song[feature]);
+      const profileVector = FEATURES.map((feature) => profile[feature]);
+      const score = cosineSimilarity(candidateVector, profileVector);
+
+      console.log("SONG:", song.track_title, candidateVector, "SCORE:", score);
+
+      return {
+        ...song,
+        score,
+      };
+    })
     .sort((a, b) => b.score - a.score)
     .slice(0, topN);
 }

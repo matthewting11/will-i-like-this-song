@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Moon, Sun } from "lucide-react";
 import ThemeToggle from "@/components/ThemeToggle";
+import { Check } from "lucide-react";
+import { motion } from "framer-motion";
 
 type Recommendation = {
   track_title: string;
@@ -18,34 +19,51 @@ type Recommendation = {
   score: number;
 };
 
+type LikedSong = {
+  track_title: string;
+  artist: string;
+  song_link: string;
+};
+
 export default function Page() {
   const [links, setLinks] = useState("");
   const [results, setResults] = useState<Recommendation[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [darkMode, setDarkMode] = useState(true);
+  const [likedLinks, setLikedLinks] = useState<Set<string>>(new Set());
+  const [addingLinks, setAddingLinks] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    const savedTheme = localStorage.getItem("theme");
-    if (savedTheme === "light") {
-      setDarkMode(false);
-      document.documentElement.classList.remove("dark");
-    } else {
-      setDarkMode(true);
-      document.documentElement.classList.add("dark");
-    }
+    fetchLikedSongs();
   }, []);
 
-  function toggleTheme() {
-    if (darkMode) {
-      document.documentElement.classList.remove("dark");
-      localStorage.setItem("theme", "light");
-      setDarkMode(false);
-    } else {
-      document.documentElement.classList.add("dark");
-      localStorage.setItem("theme", "dark");
-      setDarkMode(true);
+  async function fetchLikedSongs() {
+    try {
+      const res = await fetch("/api/liked-songs", { cache: "no-store" });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to load liked songs");
+      }
+
+      const links = new Set<string>(
+        (data.likedSongs || [])
+          .map((song: LikedSong) => normalizeLink(song.song_link))
+          .filter(Boolean) as string[]
+      );
+
+      setLikedLinks(links);
+    } catch (err) {
+      console.error(err);
     }
+  }
+
+  function normalizeLink(link: string) {
+    return (link || "").split("?")[0].replace(/\/$/, "");
+  }
+
+  function isAlreadyAdded(song: Recommendation) {
+    return likedLinks.has(normalizeLink(song.song_link));
   }
 
   async function handleRecommend(e: React.FormEvent) {
@@ -78,6 +96,12 @@ export default function Page() {
   }
 
   async function handleAdd(song: Recommendation) {
+    const normalized = normalizeLink(song.song_link);
+
+    if (likedLinks.has(normalized)) return;
+
+    setAddingLinks((prev) => new Set(prev).add(normalized));
+
     try {
       const res = await fetch("/api/add-liked", {
         method: "POST",
@@ -93,9 +117,19 @@ export default function Page() {
         throw new Error(data.error || "Failed to add song");
       }
 
-      alert(`Added "${song.track_title}" to liked songs`);
+      setLikedLinks((prev) => {
+        const next = new Set(prev);
+        next.add(normalized);
+        return next;
+      });
     } catch (err) {
       alert(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setAddingLinks((prev) => {
+        const next = new Set(prev);
+        next.delete(normalized);
+        return next;
+      });
     }
   }
 
@@ -104,9 +138,19 @@ export default function Page() {
       <div className="mx-auto max-w-6xl space-y-10">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-4xl font-bold">Music Recommender</h1>
+              <motion.h1
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, ease: "easeOut" }}
+              className="text-4xl font-bold"
+            >
+              Music Recommender
+            </motion.h1>
             <p className="mt-2 text-zinc-600 dark:text-zinc-400">
-              Paste Spotify track links and discover songs that match your taste.
+              Share your music taste • Get recommended songs • Rank your tastes
+            </p>
+            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-500">
+              Tip: Shift + click to select multiple songs, then paste them here
             </p>
           </div>
 
@@ -118,7 +162,6 @@ export default function Page() {
               View Liked Songs
             </Link>
 
-            {/* 🔥 ADD THIS */}
             <ThemeToggle />
           </div>
         </div>
@@ -162,29 +205,44 @@ export default function Page() {
             <table className="w-full text-left text-sm">
               <thead className="bg-zinc-100 text-zinc-700 dark:bg-zinc-800/80 dark:text-zinc-300">
                 <tr>
+                  <th className="px-4 py-3">Rank</th>
                   <th className="px-4 py-3">Song</th>
                   <th className="px-4 py-3">Artist</th>
-                  <th className="px-4 py-3">Score</th>
+                  <th className="px-4 py-3">Similarity</th>
                   <th className="px-4 py-3">Action</th>
                 </tr>
               </thead>
 
               <tbody>
-                {results.map((song) => (
-                  <tr key={song.song_link} className="border-t border-zinc-300 dark:border-zinc-800">
-                    <td className="px-4 py-3">{song.track_title}</td>
-                    <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">{song.artist}</td>
-                    <td className="px-4 py-3">{(song.score * 100).toFixed(1)}</td>
-                    <td className="px-4 py-3">
-                      <button
-                        onClick={() => handleAdd(song)}
-                        className="rounded-lg bg-emerald-600 px-3 py-2 font-medium text-white transition hover:bg-emerald-500"
-                      >
-                        Add
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {results.map((song, index) => {
+                  const rowKey = `${song.track_title}-${song.artist}-${song.song_link || index}`;
+                  const alreadyAdded = isAlreadyAdded(song);
+                  const adding = addingLinks.has(normalizeLink(song.song_link));
+
+                  return (
+                    <tr key={rowKey} className="border-t border-zinc-300 dark:border-zinc-800">
+                      <td className="px-4 py-3 font-medium">{index + 1}</td>
+                      <td className="px-4 py-3">{song.track_title}</td>
+                      <td className="px-4 py-3 text-zinc-600 dark:text-zinc-400">{song.artist}</td>
+                      <td className="px-4 py-3">{(song.score * 100).toFixed(1)}%</td>
+                      <td className="px-4 py-3">
+                        {alreadyAdded ? (
+                          <span className="inline-flex items-center gap-2 rounded-lg bg-emerald-100 px-3 py-2 font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                            Added ✓
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleAdd(song)}
+                            disabled={adding}
+                            className="rounded-lg bg-emerald-600 px-3 py-2 font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {adding ? "Adding..." : "Add"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </section>
